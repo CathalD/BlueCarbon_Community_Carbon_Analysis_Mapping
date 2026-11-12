@@ -2,6 +2,19 @@
 
 This workshop uses simulated sediment cores to compare methods for mapping blue carbon stocks and uncertainty.
 
+## Download the workshop from R
+
+Copy and paste this block into the R or RStudio console.
+
+```r
+if (!requireNamespace("usethis", quietly = TRUE)) {
+  install.packages("usethis", repos = "https://cloud.r-project.org")
+}
+usethis::use_course("CathalD/BlueCarbon_Community_Carbon_Analysis_Mapping")
+```
+
+Confirm the download location when prompted. Once the workshop folder opens, follow **Run the workshop** below.
+
 ## Run the workshop
 
 Open R or RStudio with this folder as the working directory. Install Quarto and the R packages once, then run the scripts in order through the workshop runner.
