@@ -23,6 +23,7 @@ params:
 #| label: setup
 #| include: false
 library(dplyr)
+source("helpers/report_widgets.R")
 
 read_result <- function(name, optional = FALSE) {
   path <- file.path(params$results_dir, paste0(name, ".csv"))
@@ -36,6 +37,7 @@ cores <- read_result("core_stocks")
 checks <- read_result("section_checks")
 coverage <- read_result("mapping_coverage")
 ecosystems <- read_result("janousek_ecosystems")
+estuaries <- read_result("janousek_estuary_comparison", optional = TRUE)
 totals <- read_result("mapping_totals")
 transfer <- read_result("transfer_summary", optional = TRUE)
 transfer_maps <- read_result("transfer_interactive_maps", optional = TRUE)
@@ -60,56 +62,7 @@ simulated <- grepl("simulat", site$data_source, ignore.case = TRUE)
 unclassified <- cores |> filter(is.na(habitat) | habitat == "Unclassified") |>
   summarise(n = n_distinct(`Core ID`)) |> pull(n)
 
-# Bundle each saved Mapview page and its local assets into an isolated iframe.
-# The basemap tiles still load from their provider when a connection is available.
-embed_map <- function(filename, title) {
-  path <- normalizePath(file.path(params$results_dir, filename), mustWork = TRUE)
-  input <- tempfile(fileext = ".md")
-  template <- tempfile(fileext = ".html")
-  bundled <- tempfile(fileext = ".html")
-  on.exit(unlink(c(input, template, bundled)), add = TRUE)
-  # Fit the heading and map inside the frame, including the layer controls and legends.
-  widget_css <- paste0(
-    "<style>",
-    "html,body{height:100%;margin:0;overflow:hidden}",
-    "#htmlwidget_container{display:flex;flex-direction:column;height:100%}",
-    "#htmlwidget_container>.leaflet{flex:1 1 0;min-height:0;height:auto!important}",
-    ".leaflet-control:empty{display:none}",
-    ".leaflet-control-layers{max-height:45vh;overflow-y:auto}",
-    "</style>"
-  )
-  widget <- readLines(path, encoding = "UTF-8")
-  widget <- sub("</head>", paste0(widget_css, "</head>"), widget, fixed = TRUE)
-  # Pass the widget through as raw HTML to preserve its layout.
-  writeLines(c("```{=html}", widget, "```"), input, useBytes = TRUE)
-  writeLines("$body$", template)
-  args <- c("--from=markdown", "--to=html", "--standalone", "--embed-resources",
-            "--template", template, paste0("--resource-path=", dirname(path)), input, "-o", bundled)
-  pandoc <- Sys.getenv("QUARTO_PANDOC")
-  if (nzchar(pandoc)) {
-    status <- system2(pandoc, shQuote(args))
-  } else {
-    quarto <- Sys.which("quarto")
-    if (!nzchar(quarto)) stop("Quarto must be available to embed the saved map pages.")
-    status <- system2(quarto, c("pandoc", shQuote(args)))
-  }
-  if (status != 0L || !file.exists(bundled)) stop("Could not embed ", filename, ".")
-  sprintf(
-    paste0('<iframe src="%s" title="%s" loading="lazy" data-external="1" ',
-           'style="width:100%%; height:600px; border:1px solid #cbd6d7; border-radius:6px;"></iframe>'),
-    base64enc::dataURI(file = bundled, mime = "text/html"),
-    htmltools::htmlEscape(title, attribute = TRUE)
-  )
-}
 
-map_tabs <- function(index, title, empty_message) {
-  if (is.null(index) || !nrow(index)) return(knitr::asis_output(empty_message))
-  tabs <- vapply(seq_len(nrow(index)), function(i) {
-    depth <- depth_label(index$depth_cm[i])
-    paste0("### ", depth, "\n\n", embed_map(index$map_file[i], paste(title, depth)), "\n\n")
-  }, character(1))
-  knitr::asis_output(paste0("::: {.panel-tabset}\n\n", paste0(tabs, collapse = ""), ":::\n"))
-}
 ```
 
 ## Summary
@@ -205,31 +158,25 @@ report_figure("janousek_profiles.png")
 report_figure("carbon_stock_context.png", params$field_dir)
 ```
 
-```{r}
-#| label: fig-bc-estuaries
-#| fig-cap: "Salt-marsh carbon stock by B.C. estuary and region."
-#| fig-alt: "Box plots show Janousek stocks by estuary and region. Coloured lines show the study zone averages and their spread."
-report_figure("janousek_bc_marsh_stocks.png", params$field_dir)
-```
+### Compare with a Janousek estuary
+
+British Columbia and Pacific Northwest comparisons remain visible for each depth. Choose an estuary to add it to the graph and table. The Pacific Northwest group includes British Columbia. A selected estuary appears at the depths reached by its reference cores.
 
 ```{r}
-bc_marsh <- ecosystems |> filter(habitat == "Salt marsh") |> arrange(depth_cm, region)
-if (nrow(bc_marsh)) {
-  report_table(bc_marsh |>
-    transmute(Region = region, Depth = depth_label(depth_cm), Cores = cores, Estuaries = estuaries,
-              Median = fmt(median_kg_m2),
-              `Middle 50%` = paste0(fmt(q25_kg_m2), " to ", fmt(q75_kg_m2))),
-    "Janousek salt-marsh carbon stocks (kg C/m²). The Pacific Northwest group includes B.C.")
+#| label: estuary-comparison
+if (is.null(estuaries)) {
+  htmltools::tags$p("Rerun Script_4_reporting.R to build the estuary comparison.")
+} else {
+  report_estuary_picker(ecosystems, estuaries, all_cores, cores, site$bc_estuary_habitat[1])
 }
 ```
 
 ## Explore the maps
 
-Choose a depth and select a map layer. You can show or hide the study boundary and core locations. Click a core to see its ID, zone and stock. Stock estimates and uncertainty layers use kg C/m². The background map loads online.
+Choose a depth and use the layer menu to compare each stock estimate with its uncertainty. **CV** is the coefficient of variation, calculated at each cell as SD divided by mean stock. A CV of 0.5 means the SD is half the mean. Estimates and SD use kg C/m². Cells with a missing SD or a nonpositive estimate have no CV. Pooled and zone CV layers use variability among sampled plots. IDW uses an SD estimated from held-out residuals. Click a cell to read its value. The satellite background loads online.
 
 ```{r}
-#| results: asis
-map_tabs(maps, "Interactive sediment carbon map", "No interactive maps were exported for this run.")
+report_map_picker(maps, params$results_dir, "sediment carbon")
 ```
 
 ## Stock across the study boundary
@@ -282,24 +229,25 @@ if (is.null(transfer) || !nrow(transfer)) {
               `AOI stock (Mg C)` = fmt(aoi_stock_Mg_C, 0)),
     "Transfer stock by depth. The mean accounts for the area of each cell with an estimate."))
   cat("\n\n")
-  print(report_table(transfer_rows |>
-    transmute(Depth = depth_label(depth_cm), Surface = tools::toTitleCase(surface),
-              `Cells with SD` = fmt(prediction_cells_with_sd, 0),
-              `Area-weighted mean SD` = fmt(area_weighted_point_sd_kg_c_m2),
-              `SD range` = if_else(is.finite(min_point_sd_kg_c_m2) & is.finite(max_point_sd_kg_c_m2),
-                                   paste(fmt(min_point_sd_kg_c_m2), "to", fmt(max_point_sd_kg_c_m2)), "—")),
-    "Uncertainty by depth (kg C/m²). SD shows the uncertainty at a single map cell."))
+  if ("area_weighted_cv" %in% names(transfer_rows)) {
+    print(report_table(transfer_rows |>
+      transmute(Depth = depth_label(depth_cm), Surface = tools::toTitleCase(surface),
+                `Cells with CV` = fmt(cells_with_cv, 0),
+                `Area-weighted CV` = fmt(area_weighted_cv),
+                `CV range` = if_else(is.finite(min_cv) & is.finite(max_cv),
+                                      paste(fmt(min_cv), "to", fmt(max_cv)), "—")),
+      "Relative uncertainty by depth. CV is point SD divided by the corresponding estimate."))
+  }
 }
 ```
 
 ### Transfer estimates and uncertainty maps
 
-Choose a depth and use the **Map layer** dropdown. **AlphaEarth embeddings** shows three of the embedding values as colours. **Janousek prior** shows the starting stock estimate. **Local Matérn correction** shows the updated stock estimate minus that starting estimate. The **Updated estimate** and the two **SD** layers show the final stock and the uncertainty before and after adding local data. Click a stock layer to see its value in kg C/m².
+Choose a depth and use the **Map layer** dropdown. **AlphaEarth embeddings** shows three of the embedding values as colours. **Janousek prior** shows the starting stock estimate. **Local Matérn correction** shows the updated stock estimate minus that starting estimate. Use **Prior uncertainty (CV)** and **Updated uncertainty (CV)** to compare relative uncertainty before and after adding local data. The corresponding SD layers show absolute uncertainty in kg C/m².
 
 ```{r}
 #| label: transfer-maps
-#| results: asis
-map_tabs(transfer_maps, "Interactive transfer learning map", "No transfer maps were exported for this run.")
+report_map_picker(transfer_maps, params$results_dir, "transfer learning")
 ```
 
 ## Interpretation and limitations
@@ -364,14 +312,14 @@ if (!all(file.exists(mrv_paths))) {
   }
 
   cat("\n\n### Stock, uncertainty, and sampling gaps\n\n",
-      "White circles mark usable cores. Yellow diamonds mark areas to inspect before drawing new samples. Use distance from usable cores to identify gaps in coverage, particularly where the selected IDW model's point SD follows mapped stock.\n\n", sep = "")
+      "White circles mark usable cores. Yellow diamonds mark areas to inspect before drawing new samples. Use distance from usable cores to identify gaps in coverage, particularly when the selected IDW model has constant CV.\n\n", sep = "")
   mrv_map_depths <- c(mrv_depth, setdiff(mrv$statistics$depth_cm, mrv_depth))
   mrv_maps <- file.path(mrv_dir, paste0("mrv_", mrv_map_depths, "cm.png"))
   mrv_map_exists <- file.exists(mrv_maps)
   if (any(mrv_map_exists)) {
     cat("::: {.panel-tabset}\n\n")
     for (i in which(mrv_map_exists)) {
-      cat(sprintf("#### %s\n\n![Mapped stock, point SD, and distance to usable cores at %s.](%s){width=100%%}\n\n",
+      cat(sprintf("#### %s\n\n![Mapped stock, uncertainty CV, and distance to usable cores at %s.](%s){width=100%%}\n\n",
                   depth_label(mrv_map_depths[i]), depth_label(mrv_map_depths[i]), mrv_maps[i]))
     }
     cat(":::\n\n")

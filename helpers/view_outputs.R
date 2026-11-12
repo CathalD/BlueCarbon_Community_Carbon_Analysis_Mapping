@@ -1,53 +1,82 @@
-# Build the same map widgets for Script 4 and for viewing results directly in R.
+# Relative uncertainty is defined only for a positive estimate and a valid SD.
+.stock_cv <- function(stock, sd) {
+  if (inherits(stock, "SpatRaster")) {
+    return(terra::ifel(is.finite(stock) & stock > 0 & is.finite(sd) & sd >= 0,
+                       sd / stock, NA_real_))
+  }
+  valid <- is.finite(stock) & stock > 0 & is.finite(sd) & sd >= 0
+  cv <- rep(NA_real_, length(stock))
+  cv[valid] <- sd[valid] / stock[valid]
+  cv
+}
+
+# Build the same Leaflet map for R, standalone HTML and the Quarto report.
 .build_output_map <- function(grid, depth_cm, source_label, local_folder, bayesian_folder,
                               transfer_folder, by_zone = NULL, prior = NULL, bayesian = NULL,
-                              embedding_map = NULL, transfer_only = FALSE, layer = NULL) {
-  surface_stats <- list()
-  basemap <- "Esri.WorldImagery"
+                              embedding_map = NULL, transfer_only = FALSE, layer = NULL,
+                              pooled = NULL) {
   suffix <- paste0(depth_cm, "cm")
   layers <- list()
   layer_values <- list()
   layer_kind <- character()
-  add_band <- function(raster, band, label, kind) {
-    if (!band %in% names(raster)) stop("Missing band ", band, " for ", label, ".")
-    layer <- raster[[band]]
-    if (!terra::compareGeom(layer, grid$template, stopOnError = FALSE)) {
+  surface_stats <- list()
+  add_raster <- function(raster, label, kind) {
+    if (!terra::compareGeom(raster, grid$template, stopOnError = FALSE)) {
       stop("The raster grid differs from the expected mapping grid for ", label, ".")
     }
-    z <- terra::values(layer, mat = FALSE)[grid$cells$cell_id]
-    if (!any(is.finite(z))) return(invisible(NULL))
-    layers[[label]] <<- layer
+    z <- terra::values(raster, mat = FALSE)[grid$cells$cell_id]
+    use <- is.finite(z)
+    if (!any(use)) return(invisible(NULL))
+    layers[[label]] <<- raster
     layer_values[[label]] <<- z
     layer_kind[label] <<- kind
-    use <- is.finite(z)
-    surface_stats[[length(surface_stats) + 1L]] <<- tibble::tibble(
-      depth_cm = depth_cm, layer = label, value_type = kind, cells = sum(use),
-      coverage_pct = 100 * sum(grid$cells$area_m2[use]) / grid$area_m2,
-      min_kg_c_m2 = min(z[use]), max_kg_c_m2 = max(z[use]),
-      area_weighted_mean_kg_c_m2 = weighted.mean(z[use], grid$cells$area_m2[use])
+    values <- z[use]
+    area <- grid$cells$area_m2[use]
+    summary <- c(min(values), max(values), weighted.mean(values, area))
+    stock_summary <- if (kind == "CV") rep(NA_real_, 3) else summary
+    surface_stats[[label]] <<- tibble::tibble(
+      depth_cm = depth_cm, layer = label, value_type = kind,
+      units = if (kind == "CV") "SD / mean" else "kg C/m²",
+      cells = sum(use), coverage_pct = 100 * sum(area) / grid$area_m2,
+      min_value = summary[1], max_value = summary[2], area_weighted_mean = summary[3],
+      min_kg_c_m2 = stock_summary[1], max_kg_c_m2 = stock_summary[2],
+      area_weighted_mean_kg_c_m2 = stock_summary[3]
     )
   }
+  add_stock <- function(stock, sd, estimate_label, sd_label, cv_label) {
+    add_raster(stock, estimate_label, "Estimate")
+    if (is.null(sd)) return(invisible(NULL))
+    add_raster(sd, sd_label, "Point SD")
+    add_raster(.stock_cv(stock, sd), cv_label, "CV")
+  }
+
   if (transfer_only) {
     estimate <- terra::rast(file.path(transfer_folder, paste0("transfer_", suffix, ".tif")))
     sd_path <- file.path(transfer_folder, paste0("transfer_uncertainty_", suffix, ".tif"))
     uncertainty <- if (file.exists(sd_path)) terra::rast(sd_path) else estimate
-    correction <- estimate[["posterior_mean_kg_c_m2"]] - estimate[["prior_mean_kg_c_m2"]]
-    names(correction) <- "correction"
-    add_band(estimate, "prior_mean_kg_c_m2", "Janousek prior", "Estimate")
-    add_band(correction, "correction", "Local Matérn correction", "Stock change")
-    add_band(estimate, "posterior_mean_kg_c_m2", "Updated estimate", "Estimate")
-    add_band(uncertainty, "prior_sd_kg_c_m2", "Prior uncertainty (SD)", "Point SD")
-    add_band(uncertainty, "posterior_sd_kg_c_m2", "Updated uncertainty (SD)", "Point SD")
+    for (surface in c("prior", "posterior")) {
+      label <- if (surface == "prior") "Prior" else "Updated"
+      add_stock(estimate[[paste0(surface, "_mean_kg_c_m2")]],
+                uncertainty[[paste0(surface, "_sd_kg_c_m2")]],
+                if (surface == "prior") "Janousek prior" else "Updated estimate",
+                paste0(label, " uncertainty (SD)"), paste0(label, " uncertainty (CV)"))
+    }
+    add_raster(estimate[["posterior_mean_kg_c_m2"]] - estimate[["prior_mean_kg_c_m2"]],
+               "Local Matérn correction", "Stock change")
   } else {
     for (method in c("area_based", "idw", "matern")) {
       path <- file.path(local_folder, paste0(method, "_", suffix, ".tif"))
       if (!file.exists(path)) next
       raster <- terra::rast(path)
-      label <- c(area_based = "Pooled area mean", idw = "IDW", matern = "Local Matérn")[method]
-      add_band(raster, "mean_kg_c_m2", paste(label, "estimate", sep = " · "), "Estimate")
-      if ("sd_kg_c_m2" %in% names(raster)) {
-        add_band(raster, "sd_kg_c_m2", paste(label, "SD", sep = " · "), "Point SD")
+      label <- c(area_based = "Pooled area mean", idw = "IDW", matern = "Local Matérn")[[method]]
+      stock <- raster[["mean_kg_c_m2"]]
+      sd <- if ("sd_kg_c_m2" %in% names(raster)) raster[["sd_kg_c_m2"]]
+      if (method == "area_based" && "plot_sd_kg_c_m2" %in% names(pooled)) {
+        plot_sd <- pooled$plot_sd_kg_c_m2[match(depth_cm, pooled$depth_cm)]
+        if (is.finite(plot_sd)) sd <- terra::ifel(is.finite(stock), plot_sd, NA_real_)
       }
+      add_stock(stock, sd, paste(label, "estimate", sep = " · "),
+                paste(label, "SD", sep = " · "), paste(label, "CV", sep = " · "))
     }
     if (!is.null(bayesian) && any(prior$depth_cm == depth_cm & prior$status == "Fitted")) {
       raster <- terra::rast(file.path(bayesian_folder, paste0("posterior_", suffix, ".tif")))
@@ -57,70 +86,89 @@
         terra::values(local_band, mat = FALSE), tolerance = 1e-8))) {
         stop("The Bayesian output differs from the local Matérn run. Rerun the Bayesian script.")
       }
-      add_band(raster, "prior_mean_kg_c_m2", "Janousek prior · estimate", "Estimate")
-      add_band(raster, "prior_sd_kg_c_m2", "Janousek prior · SD", "Point SD")
-      add_band(raster, "posterior_mean_kg_c_m2", "Bayesian posterior · estimate", "Estimate")
-      add_band(raster, "posterior_sd_kg_c_m2", "Bayesian posterior · SD", "Point SD")
+      for (surface in c("prior", "posterior")) {
+        label <- if (surface == "prior") "Janousek prior" else "Bayesian posterior"
+        add_stock(raster[[paste0(surface, "_mean_kg_c_m2")]], raster[[paste0(surface, "_sd_kg_c_m2")]],
+                  paste(label, "estimate", sep = " · "), paste(label, "SD", sep = " · "),
+                  paste(label, "CV", sep = " · "))
+      }
     }
   }
   if (!length(layers)) return(NULL)
 
-  zones <- if (!transfer_only) {
-    grid$zones |> dplyr::left_join(dplyr::filter(by_zone, depth_cm == .env$depth_cm) |>
-      dplyr::select(zone, n_plots, mean_kg_c_m2, total_mg_c, total_se_mg_c), by = "zone")
+  zones <- if (!transfer_only && nrow(grid$zones) && !is.null(by_zone)) {
+    grid$zones |>
+      dplyr::left_join(dplyr::filter(by_zone, depth_cm == .env$depth_cm) |>
+        dplyr::select(zone, n_plots, mean_kg_c_m2, dplyr::any_of("plot_sd_kg_c_m2"),
+                      total_mg_c, total_se_mg_c), by = "zone") |>
+      dplyr::filter(is.finite(mean_kg_c_m2)) |>
+      sf::st_transform(4326)
   }
-  has_zone_stock <- any(is.finite(zones$mean_kg_c_m2))
-  values_for <- function(kind) {
-    unlist(layer_values[layer_kind == kind], use.names = FALSE)
+  if (!is.null(zones) && nrow(zones)) {
+    if (!"plot_sd_kg_c_m2" %in% names(zones)) zones$plot_sd_kg_c_m2 <- NA_real_
+    zones$cv <- .stock_cv(zones$mean_kg_c_m2, zones$plot_sd_kg_c_m2)
   }
-  make_scale <- function(values, palette) {
-    highest <- max(values, na.rm = TRUE)
-    breaks <- pretty(c(0, max(highest, 0.01)), n = 5)
-    list(breaks = breaks, colours = hcl.colors(length(breaks) - 1L, palette))
-  }
-  scales <- list(Estimate = make_scale(c(values_for("Estimate"), zones$mean_kg_c_m2), "Viridis"))
-  if (any(layer_kind == "Point SD")) scales[["Point SD"]] <- make_scale(values_for("Point SD"), "YlOrRd")
-  if (any(layer_kind == "Stock change")) {
-    limit <- max(0.01, abs(values_for("Stock change")), na.rm = TRUE)
-    positive_breaks <- pretty(c(0, limit), n = 4)
-    breaks <- c(-rev(positive_breaks[-1L]), positive_breaks)
-    scales[["Stock change"]] <- list(breaks = breaks, colours = hcl.colors(length(breaks) - 1L, "Blue-Red 3"))
+  palettes <- c(Estimate = "Viridis", "Point SD" = "YlOrRd", CV = "YlOrBr", "Stock change" = "Blue-Red 3")
+  titles <- c(Estimate = "Stock estimate (kg C/m²)", "Point SD" = "Standard deviation (kg C/m²)",
+              CV = "Uncertainty CV (SD / mean)", "Stock change" = "Stock change (kg C/m²)")
+  scales <- list()
+  for (kind in unique(layer_kind)) {
+    values <- c(unlist(layer_values[layer_kind == kind], use.names = FALSE),
+                switch(kind, Estimate = zones$mean_kg_c_m2, "Point SD" = zones$plot_sd_kg_c_m2, CV = zones$cv))
+    limit <- max(pretty(c(0, max(0.01, abs(values), na.rm = TRUE) * 1.000001), n = 5))
+    domain <- c(if (kind == "Stock change") -limit else 0, limit)
+    scales[[kind]] <- list(domain = domain,
+      palette = leaflet::colorNumeric(grDevices::hcl.colors(256, palettes[[kind]]),
+                                      domain = domain, na.color = "transparent"))
   }
 
-  map <- mapview::mapview(grid$aoi, layer.name = "AOI boundary", color = "#263746",
-                          alpha.regions = 0, map.types = basemap, legend = FALSE, homebutton = FALSE,
-                          popup = FALSE)
+  aoi <- sf::st_transform(grid$aoi, 4326)
+  bbox <- sf::st_bbox(aoi)
+  widget <- leaflet::leaflet(height = 560) |>
+    leaflet::addProviderTiles(leaflet::providers$Esri.WorldImagery) |>
+    leaflet::addPolygons(data = aoi, group = "AOI boundary", color = "#253746",
+                         fill = FALSE, weight = 2, options = leaflet::pathOptions(interactive = FALSE)) |>
+    leaflet::fitBounds(unname(bbox[["xmin"]]), unname(bbox[["ymin"]]),
+                       unname(bbox[["xmax"]]), unname(bbox[["ymax"]]))
+  click_values <- list()
   for (label in names(layers)) {
-    scale <- scales[[layer_kind[label]]]
-    map <- map + mapview::mapview(layers[[label]], layer.name = label, at = scale$breaks,
-                                  col.regions = scale$colours, na.color = "transparent",
-                                  method = "ngb", map.types = basemap, legend = FALSE, homebutton = FALSE,
-                                  query.type = "click", query.prefix = "kg C/m²")
+    raster <- leaflet::projectRasterForLeaflet(layers[[label]], "ngb")
+    widget <- leaflet::addRasterImage(widget, raster, group = label, project = FALSE,
+                                      colors = scales[[layer_kind[[label]]]]$palette, opacity = 0.88)
+    # Store click values in zlib format and decode only the selected layer in the browser.
+    values <- writeBin(terra::values(raster, mat = FALSE), raw(), size = 4L, endian = "little")
+    click_values[[label]] <- list(
+      extent = unname(as.vector(terra::ext(raster))), nrow = terra::nrow(raster), ncol = terra::ncol(raster),
+      data = base64enc::base64encode(memCompress(values, type = "gzip"))
+    )
   }
-  surface_names <- names(layers)
-  if (has_zone_stock) {
-    zone_label <- "Zone area means · estimate"
-    zone_popup <- zones |> dplyr::filter(is.finite(mean_kg_c_m2)) |>
-      dplyr::select(Zone = zone, Plots = n_plots, `Stock (kg C/m²)` = mean_kg_c_m2,
-             `Total (Mg C)` = total_mg_c, `Sampling SE (Mg C)` = total_se_mg_c)
-    zone_stocks <- unique(zone_popup$`Stock (kg C/m²)`)
-    zone_palette <- if (length(zone_stocks) == 1L) {
-      scales$Estimate$colours[findInterval(zone_stocks, scales$Estimate$breaks, all.inside = TRUE)]
-    } else function(n) hcl.colors(n, "Viridis")
-    map <- map + mapview::mapview(zone_popup, zcol = "Stock (kg C/m²)", layer.name = zone_label,
-                                  at = scales$Estimate$breaks, col.regions = zone_palette,
-                                  color = "#263746", na.color = "transparent", alpha.regions = 0.85,
-                                  map.types = basemap, legend = FALSE, homebutton = FALSE)
-    surface_names <- c(surface_names, zone_label)
+
+  display_number <- function(x) ifelse(is.finite(x), formatC(x, digits = 2, format = "f"), "Unavailable")
+  if (!is.null(zones) && nrow(zones)) {
+    zone_popup <- sprintf("<strong>%s</strong><br>Plots: %s<br>Stock: %s kg C/m²<br>Plot SD: %s kg C/m²<br>CV: %s",
+                          htmltools::htmlEscape(zones$zone), zones$n_plots,
+                          display_number(zones$mean_kg_c_m2), display_number(zones$plot_sd_kg_c_m2),
+                          display_number(zones$cv))
+    for (kind in intersect(c("Estimate", "Point SD", "CV"), names(scales))) {
+      values <- switch(kind, Estimate = zones$mean_kg_c_m2, "Point SD" = zones$plot_sd_kg_c_m2, CV = zones$cv)
+      if (!any(is.finite(values))) next
+      label <- paste("Zone area means", switch(kind, Estimate = "estimate", "Point SD" = "SD", CV = "CV"), sep = " · ")
+      widget <- leaflet::addPolygons(widget, data = zones[is.finite(values), ], group = label,
+        color = "#253746", weight = 1, fillColor = scales[[kind]]$palette(values[is.finite(values)]),
+        fillOpacity = 0.88, popup = zone_popup[is.finite(values)])
+      layer_kind[label] <- kind
+    }
   }
+  points <- sf::st_transform(grid$cores, 4326)
   stock_column <- paste0("C Stock 0-", suffix)
-  points <- grid$cores |>
-    dplyr::select(`Core ID`, `Plot ID`, Zone = zone_assigned, `Stock (kg C/m²)` = dplyr::all_of(stock_column))
-  map <- map + mapview::mapview(points, layer.name = "Core locations", label = points$`Core ID`,
-                                color = "#263746", col.regions = "white", alpha.regions = 1,
-                                cex = 5, map.types = basemap, legend = FALSE, homebutton = FALSE)
-  widget <- map@map
-  if (transfer_only) {
+  core_popup <- sprintf("<strong>%s</strong><br>Plot: %s<br>Zone: %s<br>Stock: %s kg C/m²",
+    htmltools::htmlEscape(points[["Core ID"]]), htmltools::htmlEscape(points[["Plot ID"]]),
+    htmltools::htmlEscape(points$zone_assigned), display_number(points[[stock_column]]))
+  widget <- leaflet::addCircleMarkers(widget, data = points, group = "Core locations",
+    radius = 4, color = "#253746", weight = 1, fillColor = "white", fillOpacity = 1, popup = core_popup)
+
+  surface_names <- names(layer_kind)
+  if (!is.null(embedding_map)) {
     widget <- leaflet::addRasterImage(widget, embedding_map, method = "ngb", group = "AlphaEarth embeddings")
     surface_names <- c("AlphaEarth embeddings", surface_names)
   }
@@ -133,60 +181,92 @@
     default_surface <- layer
   }
   widget <- widget |>
-    leaflet::removeLayersControl() |>
     leaflet::hideGroup(setdiff(surface_names, default_surface)) |>
-    leaflet::addLayersControl(baseGroups = if (transfer_only) character() else surface_names,
-                               overlayGroups = c("AOI boundary", "Core locations"),
-                               options = leaflet::layersControlOptions(collapsed = FALSE))
+    leaflet::addLayersControl(overlayGroups = c("AOI boundary", "Core locations"),
+                               options = leaflet::layersControlOptions(collapsed = TRUE))
+  legend_ids <- stats::setNames(paste0("stock-legend-", seq_along(scales)), names(scales))
   for (kind in names(scales)) {
     scale <- scales[[kind]]
-    labels <- paste(head(scale$breaks, -1), tail(scale$breaks, -1), sep = "–")
-    widget <- leaflet::addLegend(widget, position = if (kind == "Estimate") "bottomleft" else "bottomright",
-                                 colors = scale$colours, labels = labels, opacity = 1,
-                                 className = paste("info legend", paste0("map-legend-", match(kind, names(scales)))),
-                                 title = paste0(kind, " (kg C/m²)"))
+    widget <- leaflet::addLegend(widget, position = "bottomright", pal = scale$palette,
+      values = scale$domain, title = titles[[kind]], opacity = 1,
+      labFormat = leaflet::labelFormat(digits = 2),
+      className = paste("info legend", legend_ids[[kind]]))
   }
-  layer_menu <- NULL
-  if (transfer_only) {
-    layer_menu <- htmltools::tags$label("Map layer ",
-      htmltools::tags$select(class = "transfer-map-layer",
-        lapply(surface_names, function(label) {
-          htmltools::tags$option(label, value = label,
-                                 selected = if (label == default_surface) "selected" else NULL)
-        })
-      )
-    )
-    widget <- htmlwidgets::onRender(widget, '
-      function(el, x, data) {
-        const map = this;
-        const menu = el.parentElement.querySelector(".transfer-map-layer");
-        const showSelectedLayer = () => {
-          const selected = menu.value;
-          const visibleLegend = data.legends[data.groups.indexOf(selected)];
-          data.groups.forEach(name => {
-            const layer = map.layerManager.getLayerGroup(name, false);
-            if (name === selected && !map.hasLayer(layer)) map.addLayer(layer);
-            if (name !== selected && map.hasLayer(layer)) map.removeLayer(layer);
-          });
-          el.querySelectorAll(".legend").forEach(legend => {
-            legend.hidden = !legend.classList.contains(visibleLegend);
-          });
-        };
-        menu.addEventListener("change", showSelectedLayer);
-        showSelectedLayer();
-      }',
-      data = list(groups = surface_names,
-                  legends = paste0("map-legend-", match(unname(layer_kind[surface_names]), names(scales)))))
-  }
-  widget <- htmlwidgets::prependContent(widget, htmltools::tags$div(
-    style = "padding: 10px 18px; font: 15px system-ui, sans-serif; color: #263746;",
-    htmltools::tags$strong(paste(if (transfer_only) "Transfer Learning with embeddings kernel" else "Sediment carbon",
-                                paste0("0–", depth_cm, " cm"))),
-    htmltools::tags$p(paste0(source_label, ". Click a stock layer to see its value.")),
-    layer_menu
+
+  tags <- htmltools::tags
+  widget <- htmlwidgets::prependContent(widget, tags$div(class = "stock-map-controls",
+    style = "padding: .4rem 0 .65rem; font: 15px system-ui, sans-serif;",
+    tags$label("Map layer ",
+      tags$select(class = "stock-map-layer", lapply(surface_names, function(label) {
+        tags$option(label, value = label, selected = if (label == default_surface) "selected")
+      }))
+    ),
+    tags$p(style = "margin: .3rem 0 0;", paste0(source_label, ". Click the map to read the selected value."))
   ))
+  widget <- htmlwidgets::onRender(widget, '
+    function(el, x, data) {
+      const binding = HTMLWidgets.find("#" + el.id);
+      const map = binding.getMap();
+      const menu = el.previousElementSibling.querySelector(".stock-map-layer");
+      const selectLayer = () => {
+        if (!map.layerManager) return;
+        const index = data.groups.indexOf(menu.value);
+        data.groups.forEach((name, i) => {
+          const group = map.layerManager.getLayerGroup(name, false);
+          if (i === index && !map.hasLayer(group)) map.addLayer(group);
+          if (i !== index && map.hasLayer(group)) map.removeLayer(group);
+        });
+        el.querySelectorAll(".legend").forEach(legend => {
+          legend.style.display = data.legends[index] && legend.classList.contains(data.legends[index]) ? "" : "none";
+        });
+        map.closePopup();
+      };
+      menu.addEventListener("change", selectLayer);
+      map.on("click", async event => {
+        const selected = menu.value;
+        const raster = data.values[selected];
+        if (!raster) return;
+        const point = map.options.crs.project(event.latlng);
+        const [xmin, xmax, ymin, ymax] = raster.extent;
+        const column = Math.floor((point.x - xmin) / (xmax - xmin) * raster.ncol);
+        const row = Math.floor((ymax - point.y) / (ymax - ymin) * raster.nrow);
+        if (column < 0 || column >= raster.ncol || row < 0 || row >= raster.nrow) return;
+        if (!raster.bytes) {
+          const bytes = Uint8Array.from(atob(raster.data), c => c.charCodeAt(0));
+          const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+          raster.bytes = new Response(stream).arrayBuffer().then(buffer => new DataView(buffer));
+        }
+        const bytes = await raster.bytes;
+        const value = bytes.getFloat32(4 * (row * raster.ncol + column), true);
+        if (!Number.isFinite(value) || menu.value !== selected) return;
+        const content = document.createElement("span");
+        content.textContent = selected + ": " + value.toFixed(2) +
+          (data.units[data.groups.indexOf(selected)] || "");
+        map.openPopup(content, event.latlng);
+      });
+      // Leaflet defers drawing a map in a hidden depth panel until it has a size.
+      let initialized = false;
+      new ResizeObserver(() => {
+        if (!el.clientWidth || !el.clientHeight) return;
+        binding.resize(el.clientWidth, el.clientHeight);
+        if (!initialized) {
+          selectLayer();
+          initialized = true;
+        }
+      }).observe(el);
+    }', data = list(groups = surface_names, legends = unname(legend_ids[layer_kind[surface_names]]),
+                   units = ifelse(layer_kind[surface_names] == "CV", " (SD / mean)", " kg C/m²"),
+                   values = click_values))
+
+  cv_rasters <- layers[names(layer_kind)[layer_kind == "CV"]]
+  cv_rasters <- Filter(Negate(is.null), cv_rasters)
+  if (!is.null(zones) && any(is.finite(zones$cv))) {
+    zone_shapes <- terra::project(terra::vect(zones), terra::crs(grid$template))
+    zone_cv <- terra::rasterize(zone_shapes, grid$template, field = "cv")
+    cv_rasters[["Zone area means · CV"]] <- zone_cv
+  }
   list(widget = widget, surfaces = surface_names, default_surface = default_surface,
-       stats = dplyr::bind_rows(surface_stats))
+       stats = dplyr::bind_rows(surface_stats), cv_rasters = cv_rasters)
 }
 
 .transfer_view_inputs <- function(transfer, spatial, settings, transfer_folder, transfer_inputs_folder,
@@ -232,7 +312,7 @@
   readr::read_csv(path, show_col_types = FALSE, ...)
 }
 
-# Open a Mapview map in the RStudio Viewer. Both map sets include a layer menu.
+# Open a Leaflet map in the RStudio Viewer. Both map sets include a layer menu.
 view_map <- function(depth_cm = 30, model = c("local", "transfer"), layer = NULL,
                      project_dir = ".") {
   model <- match.arg(model)
@@ -278,8 +358,9 @@ view_map <- function(depth_cm = 30, model = c("local", "transfer"), layer = NULL
     if (!depth_cm %in% available_depths) {
       stop("Available local depths (cm): ", paste(available_depths, collapse = ", "), ".", call. = FALSE)
     }
-    by_zone <- .read_view_output(local_folder, "area_summary.csv") |>
-      dplyr::filter(method == "By zone")
+    area <- .read_view_output(local_folder, "area_summary.csv")
+    by_zone <- dplyr::filter(area, method == "By zone")
+    pooled <- dplyr::filter(area, method == "Pooled")
     prior <- bayesian <- NULL
     if (file.exists(file.path(bayesian_folder, "run_settings.csv"))) {
       bayesian_run <- .read_view_output(bayesian_folder, "run_settings.csv")
@@ -291,7 +372,7 @@ view_map <- function(depth_cm = 30, model = c("local", "transfer"), layer = NULL
       bayesian <- .read_view_output(bayesian_folder, "aoi_totals.csv")
     }
     result <- .build_output_map(grid, depth_cm, source_label, local_folder, bayesian_folder,
-                                transfer_folder, by_zone, prior, bayesian, layer = layer)
+                                transfer_folder, by_zone, prior, bayesian, layer = layer, pooled = pooled)
   }
   if (is.null(result)) stop("No map layers were generated for that depth.", call. = FALSE)
   result$widget

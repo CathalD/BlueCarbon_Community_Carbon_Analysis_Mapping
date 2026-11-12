@@ -2,7 +2,7 @@
 # Run from the workshop folder after Script 1 and the local mapping script.
 # Run the Bayesian and transfer scripts to include their maps and summaries.
 # Add --render-report when running from Rscript to build Blue_Carbon_Report.html.
-# Packages: sf, terra, dplyr, tidyr, readr, ggplot2, mapview, leaflet, htmlwidgets.
+# Packages: sf, terra, dplyr, tidyr, readr, ggplot2, leaflet, htmlwidgets, base64enc.
 
 field_folder <- "outputs/script1"
 local_folder <- "outputs/script2_local"
@@ -11,6 +11,7 @@ transfer_folder <- "outputs/script3_covariate_transfer"
 transfer_inputs_folder <- "data/covariate_transfer"
 output_folder <- "outputs/script4_reporting"
 reference_file <- "data/reference/janousek_core_locations.csv.gz"
+estuary_file <- "data/reference/janousek_estuaries.csv"
 bc_estuary_habitat <- "Salt marsh"
 
 library(dplyr)
@@ -110,13 +111,16 @@ available_figures <- available_figures[file.exists(available_figures)]
 invisible(file.copy(available_figures, output_folder, overwrite = TRUE))
 
 # 2. Compare stocks over the same measured depth. The B.C. estuary figure
-# follows the NRE comparison and uses the dataset's original estuary IDs.
+# follows the NRE comparison and uses names from the published estuary lookup.
 habitats <- c(EM = "Salt marsh", SG = "Seagrass", FL = "Tideflat", TS = "Tidal swamp")
 if (!bc_estuary_habitat %in% habitats) {
   stop("Choose a B.C. estuary habitat from ", paste(habitats, collapse = ", "), ".")
 }
 depth_columns <- paste0("carbon_stock_", sort(unique(stocks$depth_cm)), "cm")
 locations <- read_csv(reference_file, col_types = cols(.default = col_character()))
+estuary_names <- read_csv(estuary_file, col_types = cols(.default = col_character())) |>
+  mutate(estuary_region = state) |>
+  separate_longer_delim(state, delim = "/")
 if (!all(depth_columns %in% names(locations))) stop("Janousek stocks are unavailable for a reported depth.")
 number <- function(x) suppressWarnings(as.numeric(x))
 reference <- locations |>
@@ -143,6 +147,13 @@ ecosystems <- bind_rows(
 bc <- reference |> filter(state == "BC", !is.na(estuary_id), nzchar(estuary_id))
 save_table(stock_distribution(ecosystems, c("region", "habitat", "depth_cm")), "janousek_ecosystems")
 save_table(stock_distribution(bc, c("habitat", "estuary_id", "depth_cm")), "janousek_bc_estuaries")
+named_estuaries <- reference |>
+  filter(!is.na(estuary_id), nzchar(estuary_id)) |>
+  left_join(estuary_names, by = c("estuary_id", "state"), relationship = "many-to-one") |>
+  mutate(estuary_name = coalesce(estuary_name, estuary_id), estuary_region = coalesce(estuary_region, state))
+save_table(stock_distribution(named_estuaries,
+                             c("habitat", "estuary_id", "estuary_region", "estuary_name", "depth_cm")),
+           "janousek_estuary_comparison")
 
 local_medians <- stocks |> group_by(depth) |> summarise(stock_kg_m2 = median(stock_kg_m2))
 context_figure <- function(data, group, title, subtitle, row_facet = FALSE) {
@@ -160,10 +171,10 @@ context_figure <- function(data, group, title, subtitle, row_facet = FALSE) {
 save_figure(context_figure(ecosystems, "habitat", "Carbon stocks by ecosystem",
                           "Janousek cores sampled to the reported depth", TRUE),
             "janousek_ecosystem_context", height = 6)
-bc_selected <- bc |> filter(habitat == bc_estuary_habitat)
+bc_selected <- named_estuaries |> filter(state == "BC", habitat == bc_estuary_habitat)
 if (nrow(bc_selected)) {
-  save_figure(context_figure(bc_selected, "estuary_id", "Carbon stocks across B.C. estuaries",
-                            paste(bc_estuary_habitat, "reference cores grouped by Janousek estuary ID")),
+  save_figure(context_figure(bc_selected, "estuary_name", "Carbon stocks across B.C. estuaries",
+                            paste(bc_estuary_habitat, "reference cores grouped by estuary")),
               "janousek_bc_estuary_context", height = max(4, 2 + 0.45 * n_distinct(bc_selected$estuary_id)))
 }
 
@@ -225,10 +236,15 @@ if (!is.null(transfer)) {
                  names_to = c("surface", ".value"),
                  names_pattern = "(prior|posterior)_(mean|sd)_kg_c_m2") |>
     filter(is.finite(mean), is.finite(sd)) |>
+    mutate(cv = .stock_cv(mean, sd)) |>
     group_by(depth_cm, surface) |>
     summarise(prediction_cells_with_sd = n(),
               area_weighted_point_sd_kg_c_m2 = weighted.mean(sd, area_m2),
               min_point_sd_kg_c_m2 = min(sd), max_point_sd_kg_c_m2 = max(sd),
+              cells_with_cv = sum(is.finite(cv)),
+              area_weighted_cv = if (any(is.finite(cv))) weighted.mean(cv, area_m2, na.rm = TRUE) else NA_real_,
+              min_cv = if (any(is.finite(cv))) min(cv, na.rm = TRUE) else NA_real_,
+              max_cv = if (any(is.finite(cv))) max(cv, na.rm = TRUE) else NA_real_,
               median_effective_donors = median(effective_donors), .groups = "drop")
   transfer_summary <- transfer |>
     left_join(transfer_stats, by = c("depth_cm", "surface")) |>
@@ -244,23 +260,34 @@ if (!is.null(transfer)) {
   embedding_map <- transfer_view$embedding_map
 }
 
-# 5. Save a Mapview page per depth for each set of models.
+# 5. Save a Leaflet page and a Quarto widget per depth for each set of models.
 # Core points and the AOI outline stay available as separate overlays.
-previous_maps <- list.files(output_folder, pattern = "^map_(transfer_)?[0-9.]+cm\\.html$", full.names = TRUE)
+previous_maps <- list.files(output_folder, pattern = "^map_(transfer_)?(cv_)?[0-9.]+cm\\.(html|rds|tif)$",
+                            full.names = TRUE)
 unlink(c(previous_maps, file.path(output_folder, "map_libraries")), recursive = TRUE)
+pooled <- filter(area, method == "Pooled")
 write_maps <- function(grid, depths, transfer_only = FALSE) {
   map_index <- list()
   surface_stats <- list()
   for (depth_cm in sort(unique(depths))) {
     result <- .build_output_map(grid, depth_cm, source_label, local_folder, bayesian_folder,
                                 transfer_folder, by_zone, prior, bayesian,
-                                if (transfer_only) embedding_map else NULL, transfer_only)
+                                if (transfer_only) embedding_map else NULL, transfer_only, pooled = pooled)
     if (is.null(result)) next
     suffix <- paste0(depth_cm, "cm")
-    map_file <- paste0(if (transfer_only) "map_transfer_" else "map_", suffix, ".html")
+    prefix <- if (transfer_only) "map_transfer_" else "map_"
+    map_file <- paste0(prefix, suffix, ".html")
+    widget_file <- paste0(prefix, suffix, ".rds")
     htmlwidgets::saveWidget(result$widget, file.path(output_folder, map_file),
                             selfcontained = FALSE, libdir = "map_libraries", title = depth_label(depth_cm))
-    map_index[[suffix]] <- tibble(depth_cm = depth_cm, map_file = map_file,
+    saveRDS(result$widget, file.path(output_folder, widget_file))
+    if (length(result$cv_rasters)) {
+      cv <- do.call(c, unname(result$cv_rasters))
+      names(cv) <- names(result$cv_rasters)
+      terra::writeRaster(cv, file.path(output_folder, paste0(prefix, "cv_", suffix, ".tif")),
+                         overwrite = TRUE)
+    }
+    map_index[[suffix]] <- tibble(depth_cm = depth_cm, map_file = map_file, widget_file = widget_file,
                                   default_surface = result$default_surface, surfaces = length(result$surfaces))
     surface_stats[[suffix]] <- result$stats
   }

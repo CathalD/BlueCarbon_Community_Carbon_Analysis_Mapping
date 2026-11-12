@@ -21,12 +21,14 @@ Open R or RStudio with this folder as the working directory. Install Quarto and 
 
 ```r
 install.packages(c("readxl", "dplyr", "readr", "tidyr", "ggplot2", "sf", "terra",
-                   "mapview", "leaflet", "htmlwidgets", "htmltools", "knitr",
+                   "leaflet", "htmlwidgets", "htmltools", "knitr",
                    "rmarkdown", "base64enc", "quarto"))
 source("Run_and_Visualize.R")
 ```
 
 The runner reads the supplied workshop inputs in `data/`, writes results to `outputs/` and builds the HTML report. The AlphaEarth raster is supplied as lossless GeoTIFF tiles. Keep the tiles together in `data/covariate_transfer/`. Script 3 reads them as a single raster. See the [Earth Engine workflow](data/covariate_transfer/README.md) to prepare inputs for another site.
+
+On Windows, extract the workshop to a local folder before running it in RStudio. Install Quarto for Windows and restart RStudio if it was open during installation. Open `Blue_Carbon_Report.html` directly in Microsoft Edge. The report embeds its maps and comparison data in one HTML file. An internet connection adds the satellite background. The model layers, legends, dropdowns and comparison table work without it.
 
 Local stock is summed to the target depth or the sampled bottom, whichever comes first. When a section crosses the target, the calculation uses its carbon per centimetre for the part inside the target interval. A valid 20 cm core contributes the same measured stock at the 30, 50 and 100 cm targets.
 
@@ -43,7 +45,7 @@ View(view_table("transfer", depth_cm = 30))               # Transfer summary in 
 view_table("totals")                                     # Mapping totals in the console
 ```
 
-Map depths are 30, 50 and 100 cm. The transfer map also offers the AlphaEarth embeddings, Janousek prior, updated estimate and both uncertainty layers. To load the viewing functions after restarting R with existing outputs, run `source("helpers/view_outputs.R")`.
+Map depths are 30, 50 and 100 cm. Use the layer dropdown to switch between each estimate and its uncertainty. The uncertainty layers show CV (point SD divided by mean stock), with SD also available in kg C/m². The transfer map offers separate prior and updated CV layers. Script 4 writes the CV rasters to `outputs/script4_reporting/` as `map_cv_*cm.tif` and `map_transfer_cv_*cm.tif`. To load the viewing functions after restarting R with existing outputs, run `source("helpers/view_outputs.R")`.
 
 ## Plan monitoring and repeat sampling
 
@@ -71,6 +73,6 @@ The rendered report, prediction tables, figures and saved maps are generated loc
 
 ## Data sources
 
-The reference cores come from Janousek et al. (2025). [Reference dataset](https://doi.org/10.25573/SERC.28127486) · [Paper](https://doi.org/10.1029/2024GB008239)
+The reference cores and estuary names come from Janousek et al. (2025). The bundled `data/reference/janousek_estuaries.csv` contains the name, code and jurisdiction columns from their CC BY 4.0 estuary lookup. [Reference dataset](https://doi.org/10.25573/SERC.28127486) · [Paper](https://doi.org/10.1029/2024GB008239)
 
 The AlphaEarth Foundations Satellite Embedding dataset is produced by Google and Google DeepMind. The included 2024 exports are clipped and tiled for the workshop and are licensed under CC BY 4.0. [Dataset and attribution](https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_SATELLITE_EMBEDDING_V1_ANNUAL)
