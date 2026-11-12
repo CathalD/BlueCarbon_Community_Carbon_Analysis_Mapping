@@ -329,3 +329,78 @@ Each total uses stock up to the listed depth or the sampled bottom at each study
 ## Reference
 
 Janousek, C. N., et al. (2025). Blue carbon stocks along the Pacific coast of North America are mainly driven by local rather than regional factors. *Global Biogeochemical Cycles, 39*, e2024GB008239. [doi:10.1029/2024GB008239](https://doi.org/10.1029/2024GB008239)
+
+## Monitoring, reporting, and verification
+
+```{r}
+#| label: mrv-and-sampling-plan
+#| results: asis
+mrv_dir <- "outputs/script5_mrv"
+mrv_files <- c(statistics = "mrv_statistics.csv", validation = "model_validation.csv",
+               zones = "zone_guidance.csv", plan = "monitoring_plan.csv",
+               actions = "next_steps.csv")
+mrv_paths <- file.path(mrv_dir, mrv_files)
+
+if (!all(file.exists(mrv_paths))) {
+  cat("Run `Script_5_MRV.R` after Scripts 1 and 2 to generate the baseline statistics, maps, and sampling plan.\n")
+} else {
+  mrv <- lapply(setNames(mrv_paths, names(mrv_files)), readr::read_csv,
+                show_col_types = FALSE)
+  mrv_depth <- mrv$plan$depth_cm[[1L]]
+
+  cat("### Baseline carbon stock\n\n")
+  if (simulated) cat("The workshop uses simulated cores. These estimates illustrate the workflow.\n\n")
+  cat("The results describe baseline sediment carbon stocks. Estimating change and net removals requires a repeat campaign and the applicable blue carbon methodology.\n\n")
+  print(report_table(mrv$statistics |>
+    transmute(Depth = depth_label(depth_cm), Model = coalesce(model, "Unavailable"),
+              `Cores reaching depth` = full_depth_cores, `Usable plots` = full_depth_qc_mapped_plots,
+              `Map coverage (%)` = fmt(coverage_pct, 1),
+              `Mapped mean (Mg C/ha)` = fmt(covered_mean_mg_c_ha, 1),
+              `AOI stock (Mg C)` = fmt(aoi_stock_mg_c, 0),
+              `AOI stock SD (Mg C)` = fmt(aoi_stock_sd_mg_c, 0)),
+    "Area-weighted baseline estimates. A dash indicates an unavailable value."))
+  if (any(!is.finite(mrv$statistics$aoi_stock_sd_mg_c))) {
+    cat("\n\nWhere project-wide stock uncertainty is unavailable, the point-level standard deviation (SD) cannot substitute for it.\n")
+  }
+
+  cat("\n\n### Stock, uncertainty, and sampling gaps\n\n",
+      "White circles mark usable cores. Yellow diamonds mark areas to inspect before drawing new samples. Use distance from usable cores to identify gaps in coverage, particularly where the selected IDW model's point SD follows mapped stock.\n\n", sep = "")
+  mrv_map_depths <- c(mrv_depth, setdiff(mrv$statistics$depth_cm, mrv_depth))
+  mrv_maps <- file.path(mrv_dir, paste0("mrv_", mrv_map_depths, "cm.png"))
+  mrv_map_exists <- file.exists(mrv_maps)
+  if (any(mrv_map_exists)) {
+    cat("::: {.panel-tabset}\n\n")
+    for (i in which(mrv_map_exists)) {
+      cat(sprintf("#### %s\n\n![Mapped stock, point SD, and distance to usable cores at %s.](%s){width=100%%}\n\n",
+                  depth_label(mrv_map_depths[i]), depth_label(mrv_map_depths[i]), mrv_maps[i]))
+    }
+    cat(":::\n\n")
+  }
+
+  cat("### Where to sample next\n\n")
+  print(report_table(mrv$zones |> filter(depth_cm == mrv_depth) |> arrange(priority_order) |>
+    transmute(Priority = priority_order, Zone = zone, `Usable plots` = full_depth_qc_plots,
+              `Largest gap (km)` = fmt(max_gap_m / 1000, 1), Action = action),
+    paste("Sampling priorities at", depth_label(mrv_depth), "in recommended order.")))
+
+  cat("\n\n### When to repeat sampling\n\n")
+  cat(sprintf("The planning calculation uses %.0f%% confidence and %.0f%% power for independent paired plots.\n\n",
+              100 * mrv$plan$confidence, 100 * mrv$plan$power))
+  if (is.finite(mrv$plan$minimum_detectable_change_mg_c_ha)) {
+    cat(sprintf("The planned repeat panel has an approximate minimum detectable change of %s Mg C/ha.\n\n",
+                fmt(mrv$plan$minimum_detectable_change_mg_c_ha)))
+  }
+  cat(paste(sprintf("%d. %s", mrv$actions$order, mrv$actions$action), collapse = "\n"), "\n\n", sep = "")
+
+  if (nrow(mrv$validation)) {
+    cat("### Model checks\n\n")
+    print(report_table(mrv$validation |>
+      transmute(Depth = depth_label(depth_cm), Model = method, Selected = if_else(selected, "Yes", ""),
+                `Held-out plots` = held_out_plots, `Log RMSE` = fmt(rmse_log, 3),
+                `RMSE (Mg C/ha)` = fmt(rmse_mg_c_ha), `Bias (Mg C/ha)` = fmt(bias_mg_c_ha)),
+      "Held-out performance on common plots. RMSE is the root mean square error."))
+    cat("\n\nThe same folds were used for model tuning, so the scores are exploratory. The Bayesian and AlphaEarth transfer surfaces lack comparable held-out scores.\n\n")
+  }
+  cat("[Standalone MRV report](outputs/script5_mrv/mrv_report.html) · [Sampling areas for GIS](outputs/script5_mrv/sampling_guidance.gpkg)\n")
+}
+```

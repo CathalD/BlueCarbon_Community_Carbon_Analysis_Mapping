@@ -4,6 +4,8 @@ source("Script_2.2_Bayesian.R")
 source("Script_3_covariate_transfer.R")
 source("Script_4_reporting.R")
 
+source("Script_5_MRV.R")
+
 source("helpers/view_outputs.R")
 
 # Run any of these lines in the R console to explore the results.

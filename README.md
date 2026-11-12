@@ -45,6 +45,20 @@ view_table("totals")                                     # Mapping totals in the
 
 Map depths are 30, 50 and 100 cm. The transfer map also offers the AlphaEarth embeddings, Janousek prior, updated estimate and both uncertainty layers. To load the viewing functions after restarting R with existing outputs, run `source("helpers/view_outputs.R")`.
 
+## Plan monitoring and repeat sampling
+
+The runner executes Script 5 after Script 4. To rebuild just the MRV outputs
+after Scripts 1 and 2 have finished, use `source("Script_5_MRV.R")` from the
+workshop folder. Open `outputs/script5_mrv/mrv_report.html` for the baseline
+statistics, maps, and sampling guidance. The same folder contains CSV tables,
+GeoTIFFs by depth, and a GeoPackage with zones and sampling focus areas.
+
+Set the reporting depth and enter site-specific change, paired-plot
+variability, and sample size in the `plan` block of Script 5. A confirmed
+baseline date adds a calendar year to the repeat-sampling estimate. Leave
+unknown inputs blank (`NA`) to get pilot guidance. Stock estimates from the
+workshop are for planning and use simulated cores.
+
 ## Build the report
 
 To rebuild [the report](Blue_Carbon_Report.qmd) from existing results, run Quarto from the project folder.
