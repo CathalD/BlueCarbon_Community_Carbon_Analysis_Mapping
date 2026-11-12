@@ -21,6 +21,7 @@ local({
   library(dplyr)
   library(ggplot2)
   source("helpers/local_mapping_spatial.R", local = TRUE)
+  source("helpers/view_outputs.R", local = TRUE)
 
   optional_positive <- c(plan$meaningful_change_mg_c_ha, plan$expected_change_mg_c_ha_yr,
                          plan$paired_change_sd_mg_c_ha)
@@ -196,6 +197,7 @@ local({
     nearest <- nearest_distance(grid, support)
     mean_stock[!predicted] <- NA_real_
     point_sd[!is.finite(point_sd)] <- NA_real_
+    point_cv <- .stock_cv(mean_stock, point_sd)
 
     # Each focus area is a grid point around which to randomize new plots.
     # Spread multiple focus areas by updating distance after each selection.
@@ -288,7 +290,7 @@ local({
       held_out_rmse_log = if (nrow(ranking)) ranking$rmse_log[1L] else NA_real_,
       change_status = "Baseline only; change and crediting deduction unestimated"
     )
-    bands <- data.frame(stock_mg_c_ha = mean_stock, point_sd_mg_c_ha = point_sd,
+    bands <- data.frame(stock_mg_c_ha = mean_stock, point_sd_mg_c_ha = point_sd, point_cv = point_cv,
                         gap_to_full_depth_core_m = nearest)
     export_mapping_raster(inputs, bands, file.path(out, paste0("mrv_", depth, "cm.tif")))
 
@@ -319,7 +321,7 @@ local({
       grid::pushViewport(grid::viewport(layout = grid::grid.layout(1, 3)))
       print(map_layer(mean_stock, "Mapped stock (Mg C/ha)", "viridis"),
             vp = grid::viewport(layout.pos.col = 1))
-      print(map_layer(point_sd, "Point SD (Mg C/ha)", "magma"),
+      print(map_layer(point_cv, "Uncertainty CV (SD / mean)", "magma"),
             vp = grid::viewport(layout.pos.col = 2))
       print(map_layer(nearest / 1000, "Distance to usable cores (km)", "cividis", TRUE),
             vp = grid::viewport(layout.pos.col = 3))
@@ -469,7 +471,7 @@ local({
       tags$p("The AOI total weights each estimate by the area of the grid cell inside the boundary. A full-area total requires complete map coverage. Usable plots have a geolocated core reaching the target depth with no Script 1 QC flag."),
       tags$h2(paste0("Where to sample next at 0–", report_depth, " cm")),
       image_tag(main_figure, report_depth),
-      tags$p("White circles mark usable cores. Diamonds identify coverage gaps for field reconnaissance. They are screening locations. Use a probability design to choose the actual plots. IDW point SD is a residual-based proxy and tends to rise with mapped stock. Treat the gap map as the primary coverage guide."),
+      tags$p("White circles mark usable cores. Diamonds identify coverage gaps for field reconnaissance. They are screening locations. Use a probability design to choose the actual plots. The uncertainty map shows point SD divided by mean stock. IDW uses an SD proxy from held-out residuals, so its CV can be constant across the map. Use the distance map to identify sampling gaps."),
       tags$div(class = "table", html_table(focus_table)),
       tags$p("Zone plot means describe the sampled plots. Repeated cores at one plot are averaged before comparing plots."),
       tags$h2("Repeat sampling"),
