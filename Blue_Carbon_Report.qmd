@@ -1,0 +1,331 @@
+---
+title: "Community Blue Carbon"
+subtitle: "Sediment carbon stocks and mapping workshop"
+lang: en-CA
+format:
+  html:
+    theme: litera
+    toc: true
+    toc-title: "In this report"
+    embed-resources: true
+    fig-width: 10
+    fig-height: 5
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  results_dir: "outputs/script4_reporting"
+  field_dir: "outputs/script1"
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(dplyr)
+
+read_result <- function(name, optional = FALSE) {
+  path <- file.path(params$results_dir, paste0(name, ".csv"))
+  if (file.exists(path)) return(readr::read_csv(path, show_col_types = FALSE))
+  if (!optional) stop("Missing ", path, ". Run Script_4_reporting.R first.")
+}
+
+site <- read_result("site_summary")
+field <- read_result("field_stock_summary")
+cores <- read_result("core_stocks")
+checks <- read_result("section_checks")
+coverage <- read_result("mapping_coverage")
+ecosystems <- read_result("janousek_ecosystems")
+totals <- read_result("mapping_totals")
+transfer <- read_result("transfer_summary", optional = TRUE)
+transfer_maps <- read_result("transfer_interactive_maps", optional = TRUE)
+maps <- read_result("interactive_maps", optional = TRUE)
+prior <- read_result("bayesian_prior_parameters", optional = TRUE)
+settings <- read_result("mapping_settings", optional = TRUE)
+
+depth_label <- function(depth) paste0("0–", depth, " cm")
+fmt <- function(x, digits = 2L) {
+  ifelse(is.finite(x), formatC(x, digits = digits, format = "f", big.mark = ","), "—")
+}
+report_table <- function(data, caption) {
+  knitr::kable(data, caption = caption, row.names = FALSE, format = "pipe")
+}
+report_figure <- function(filename, folder = params$results_dir) {
+  knitr::include_graphics(file.path(folder, filename))
+}
+
+all_cores <- field |> filter(zone == "All cores") |> arrange(depth_cm)
+deepest <- all_cores |> filter(complete > 0) |> slice_max(depth_cm, n = 1, with_ties = FALSE)
+simulated <- grepl("simulat", site$data_source, ignore.case = TRUE)
+unclassified <- cores |> filter(is.na(habitat) | habitat == "Unclassified") |>
+  summarise(n = n_distinct(`Core ID`)) |> pull(n)
+
+# Bundle each saved Mapview page and its local assets into an isolated iframe.
+# The basemap tiles still load from their provider when a connection is available.
+embed_map <- function(filename, title) {
+  path <- normalizePath(file.path(params$results_dir, filename), mustWork = TRUE)
+  input <- tempfile(fileext = ".md")
+  template <- tempfile(fileext = ".html")
+  bundled <- tempfile(fileext = ".html")
+  on.exit(unlink(c(input, template, bundled)), add = TRUE)
+  # Fit the heading and map inside the frame, including the layer controls and legends.
+  widget_css <- paste0(
+    "<style>",
+    "html,body{height:100%;margin:0;overflow:hidden}",
+    "#htmlwidget_container{display:flex;flex-direction:column;height:100%}",
+    "#htmlwidget_container>.leaflet{flex:1 1 0;min-height:0;height:auto!important}",
+    ".leaflet-control:empty{display:none}",
+    ".leaflet-control-layers{max-height:45vh;overflow-y:auto}",
+    "</style>"
+  )
+  widget <- readLines(path, encoding = "UTF-8")
+  widget <- sub("</head>", paste0(widget_css, "</head>"), widget, fixed = TRUE)
+  # Pass the widget through as raw HTML to preserve its layout.
+  writeLines(c("```{=html}", widget, "```"), input, useBytes = TRUE)
+  writeLines("$body$", template)
+  args <- c("--from=markdown", "--to=html", "--standalone", "--embed-resources",
+            "--template", template, paste0("--resource-path=", dirname(path)), input, "-o", bundled)
+  pandoc <- Sys.getenv("QUARTO_PANDOC")
+  if (nzchar(pandoc)) {
+    status <- system2(pandoc, shQuote(args))
+  } else {
+    quarto <- Sys.which("quarto")
+    if (!nzchar(quarto)) stop("Quarto must be available to embed the saved map pages.")
+    status <- system2(quarto, c("pandoc", shQuote(args)))
+  }
+  if (status != 0L || !file.exists(bundled)) stop("Could not embed ", filename, ".")
+  sprintf(
+    paste0('<iframe src="%s" title="%s" loading="lazy" data-external="1" ',
+           'style="width:100%%; height:600px; border:1px solid #cbd6d7; border-radius:6px;"></iframe>'),
+    base64enc::dataURI(file = bundled, mime = "text/html"),
+    htmltools::htmlEscape(title, attribute = TRUE)
+  )
+}
+
+map_tabs <- function(index, title, empty_message) {
+  if (is.null(index) || !nrow(index)) return(knitr::asis_output(empty_message))
+  tabs <- vapply(seq_len(nrow(index)), function(i) {
+    depth <- depth_label(index$depth_cm[i])
+    paste0("### ", depth, "\n\n", embed_map(index$map_file[i], paste(title, depth)), "\n\n")
+  }, character(1))
+  knitr::asis_output(paste0("::: {.panel-tabset}\n\n", paste0(tabs, collapse = ""), ":::\n"))
+}
+```
+
+## Summary
+
+```{r}
+#| results: asis
+if (simulated) {
+  cat("::: {.callout-note appearance=\"simple\"}\n## Workshop example\n",
+      "This workshop uses simulated core values. The stock estimates and maps are examples for practice.\n",
+      ":::\n", sep = "")
+}
+```
+
+The study includes **`r fmt(site$logged_cores, 0)` cores** from `r fmt(site$plots, 0)` plots in `r fmt(site$zones, 0)` zones. The study area covers **`r fmt(site$area_ha, 0)` ha**. For the `r depth_label(deepest$depth_cm)` estimate, the median stock across `r fmt(deepest$complete, 0)` usable cores was **`r fmt(deepest$median_kg_m2)` kg C/m²**.
+
+```{r}
+report_table(all_cores |>
+  transmute(Depth = depth_label(depth_cm), `Cores used` = complete, `Shorter cores` = short_cores,
+            Mean = fmt(mean_kg_m2), SD = fmt(sd_kg_m2), Median = fmt(median_kg_m2),
+            Range = if_else(complete > 0, paste0(fmt(min_kg_m2), " to ", fmt(max_kg_m2)), "—")),
+  "Carbon stock by depth (kg C/m²). Shorter cores contribute stock to their sampled bottom. Standard deviation (SD) shows how much stock varies among cores.")
+```
+
+## Data and methods
+
+We used `r fmt(site$sections, 0)` sediment sections. For cores that shortened during sampling, we scaled the depths by the ratio of the length inserted to the length recovered. We assumed each core compressed evenly. We used dry sediment mass and organic carbon content to calculate stock for each section.
+
+For 0–30 cm, we add the carbon from the surface down to 30 cm or the sampled bottom, whichever comes first. If a section crosses 30 cm, we divide its stock by its thickness in centimetres and multiply by the centimetres inside the 0–30 cm interval. We use the same rule for 50 and 100 cm.
+
+We treat the sampled bottom of a usable short core as the maximum depth and carry its sampled stock forward to deeper targets. A 20 cm core therefore gives the same stock at all three targets. A 40 cm core gives its stock to 30 cm for the first target and its stock to 40 cm for both deeper targets. An unusable section or a gap prevents us from estimating stock beyond that break.
+
+```{r}
+report_table(checks |>
+  transmute(`Carbon method` = coalesce(carbon_method, "Unavailable"),
+            `Section check` = coalesce(section_check, "Unavailable"),
+            `Lab review` = coalesce(lab_review, "—"), Sections = sections),
+  paste("Section checks.", fmt(site$cores_to_review, 0), "cores were flagged for review."))
+```
+
+## Carbon by depth
+
+```{r}
+#| results: asis
+zone_at_depth <- field |>
+  filter(zone != "All cores", depth_cm == deepest$depth_cm, complete > 0) |>
+  arrange(mean_kg_m2)
+if (nrow(zone_at_depth) > 1 && diff(range(zone_at_depth$mean_kg_m2)) > 0) {
+  low <- slice_head(zone_at_depth, n = 1)
+  high <- slice_tail(zone_at_depth, n = 1)
+  cat(sprintf("At %s, the zone mean ranged from **%s kg C/m² in %s** to **%s kg C/m² in %s**.\n",
+              depth_label(deepest$depth_cm), fmt(low$mean_kg_m2), low$zone,
+              fmt(high$mean_kg_m2), high$zone))
+}
+```
+
+```{r}
+#| label: fig-sediment
+#| fig-cap: "Carbon and sediment density by depth. Each point is one core section."
+#| fig-alt: "Three plots show organic carbon, dry sediment density, and carbon density by depth. Colours show the sampling zones."
+report_figure("sediment_profiles.png")
+```
+
+```{r}
+#| label: fig-cumulative
+#| fig-cap: "Carbon stock from the surface to each depth. Each line is one core."
+#| fig-alt: "Carbon stock increases with depth in each core. Colours show the sampling zones."
+report_figure("cumulative_carbon_stock.png")
+```
+
+## Comparison with Janousek cores
+
+We compared the study cores with cores from Janousek et al. (2025) in Alaska, British Columbia, Washington and Oregon. The reference values come from Janousek cores that reached the stated depth. Study cores contribute stock to the stated depth or to their sampled bottom.
+
+```{r}
+#| results: asis
+if (unclassified > 0) {
+  cat(sprintf("Habitat is unknown for %s of %s study cores. The figures show how those cores compare with regional and B.C. salt-marsh data.\n",
+              fmt(unclassified, 0), fmt(site$logged_cores, 0)))
+}
+```
+
+```{r}
+#| label: fig-reference-profiles
+#| fig-cap: "Study zone averages and Janousek salt-marsh ranges by depth. Shaded bands show the middle 50% and 80% of reference values."
+#| fig-alt: "Coloured lines show study zone averages against grey ranges from Janousek cores."
+report_figure("janousek_profiles.png")
+```
+
+```{r}
+#| label: fig-reference-ecosystems
+#| fig-cap: "Carbon stock by ecosystem. Solid lines show zone averages. Dashed lines show one SD on either side."
+#| fig-alt: "Box plots show Janousek stocks by ecosystem and depth. Coloured lines mark the study zone averages and their spread."
+report_figure("carbon_stock_context.png", params$field_dir)
+```
+
+```{r}
+#| label: fig-bc-estuaries
+#| fig-cap: "Salt-marsh carbon stock by B.C. estuary and region."
+#| fig-alt: "Box plots show Janousek stocks by estuary and region. Coloured lines show the study zone averages and their spread."
+report_figure("janousek_bc_marsh_stocks.png", params$field_dir)
+```
+
+```{r}
+bc_marsh <- ecosystems |> filter(habitat == "Salt marsh") |> arrange(depth_cm, region)
+if (nrow(bc_marsh)) {
+  report_table(bc_marsh |>
+    transmute(Region = region, Depth = depth_label(depth_cm), Cores = cores, Estuaries = estuaries,
+              Median = fmt(median_kg_m2),
+              `Middle 50%` = paste0(fmt(q25_kg_m2), " to ", fmt(q75_kg_m2))),
+    "Janousek salt-marsh carbon stocks (kg C/m²). The Pacific Northwest group includes B.C.")
+}
+```
+
+## Explore the maps
+
+Choose a depth and select a map layer. You can show or hide the study boundary and core locations. Click a core to see its ID, zone and stock. Stock estimates and uncertainty layers use kg C/m². The background map loads online.
+
+```{r}
+#| results: asis
+map_tabs(maps, "Interactive sediment carbon map", "No interactive maps were exported for this run.")
+```
+
+## Stock across the study boundary
+
+These maps use cells `r fmt(site$grid_spacing_m, 0)` m apart. The pooled estimate averages the sampled plots. The zone-weighted estimate uses each zone's average stock and area. Inverse distance weighting (IDW) gives more weight to nearby cores. The local Matérn model also uses distance to estimate stock across the grid. The Bayesian model updates a starting estimate from Janousek cores with the study cores.
+
+```{r}
+report_table(coverage |> arrange(depth_cm) |>
+  transmute(Depth = depth_label(depth_cm), `Mapped cores` = mapped_cores,
+            `Mapped plots` = mapped_plots, `Cores without a usable estimate` = incomplete_or_invalid_cores),
+  "Core and plot coverage at each mapping depth.")
+```
+
+```{r}
+#| label: fig-mapping-totals
+#| fig-cap: "Total carbon by method and depth. Bars show one standard error or standard deviation, as labelled."
+#| fig-alt: "Points show total stock estimates by method and depth. Bars show uncertainty where available."
+report_figure("mapping_totals.png")
+```
+
+```{r}
+report_table(totals |> arrange(depth_cm) |>
+  transmute(Depth = depth_label(depth_cm), Method = method,
+            `Mean stock (kg C/m²)` = fmt(mean_kg_c_m2), `Total (Mg C)` = fmt(total_mg_c, 0),
+            `Coverage (%)` = fmt(coverage_pct, 0),
+            `Uncertainty (Mg C)` = if_else(is.finite(uncertainty_mg_c),
+              paste0("±", fmt(uncertainty_mg_c, 0), " ", uncertainty_type), "—")),
+  "Estimated sediment carbon stocks by depth and method.")
+```
+
+The sampling standard error (SE) shows how much an estimate could vary with a different sample of plots. The model SD for a total accounts for how estimates at nearby locations vary together. A dash marks an unavailable value.
+
+## Transfer Learning with embeddings kernel
+
+AlphaEarth describes each map cell with 64 values called embeddings. The embeddings kernel gives more weight to Janousek cores from places with similar values. This gives a starting estimate called the Janousek prior. The local Matérn model adjusts that estimate using the study cores and their distance from each cell.
+
+```{r}
+#| label: transfer-results
+#| results: asis
+if (is.null(transfer) || !nrow(transfer)) {
+  cat("Run Scripts 3 and 4 to populate the transfer results.\n")
+} else {
+  transfer_rows <- transfer |> arrange(depth_cm, desc(surface))
+  print(report_table(transfer_rows |>
+    transmute(Depth = depth_label(depth_cm), Surface = tools::toTitleCase(surface),
+              `Janousek cores` = fmt(n_reference_cores, 0),
+              `Local cores used` = if_else(surface == "posterior", fmt(n_local_cores_used, 0), "—"),
+              `Coverage (%)` = fmt(100 * coverage_fraction, 1),
+              `Mean stock (kg C/m²)` = fmt(mean_covered_kg_c_m2),
+              `AOI stock (Mg C)` = fmt(aoi_stock_Mg_C, 0)),
+    "Transfer stock by depth. The mean accounts for the area of each cell with an estimate."))
+  cat("\n\n")
+  print(report_table(transfer_rows |>
+    transmute(Depth = depth_label(depth_cm), Surface = tools::toTitleCase(surface),
+              `Cells with SD` = fmt(prediction_cells_with_sd, 0),
+              `Area-weighted mean SD` = fmt(area_weighted_point_sd_kg_c_m2),
+              `SD range` = if_else(is.finite(min_point_sd_kg_c_m2) & is.finite(max_point_sd_kg_c_m2),
+                                   paste(fmt(min_point_sd_kg_c_m2), "to", fmt(max_point_sd_kg_c_m2)), "—")),
+    "Uncertainty by depth (kg C/m²). SD shows the uncertainty at a single map cell."))
+}
+```
+
+### Transfer estimates and uncertainty maps
+
+Choose a depth and use the **Map layer** dropdown. **AlphaEarth embeddings** shows three of the embedding values as colours. **Janousek prior** shows the starting stock estimate. **Local Matérn correction** shows the updated stock estimate minus that starting estimate. The **Updated estimate** and the two **SD** layers show the final stock and the uncertainty before and after adding local data. Click a stock layer to see its value in kg C/m².
+
+```{r}
+#| label: transfer-maps
+#| results: asis
+map_tabs(transfer_maps, "Interactive transfer learning map", "No transfer maps were exported for this run.")
+```
+
+## Interpretation and limitations
+
+```{r}
+#| results: asis
+if (!is.null(settings)) {
+  model_check <- settings |> filter(is.finite(rmse_log)) |> group_by(depth_cm) |>
+    slice_min(rmse_log, n = 1, with_ties = FALSE) |> ungroup()
+  if (nrow(model_check) > 0 && n_distinct(model_check$method) == 1) {
+    cat(sprintf("Among the local models, **%s** had the smallest prediction error at all %s depths tested. We checked this by leaving plots out of the fit and predicting their stocks on the log scale.\n\n",
+                first(model_check$method), fmt(nrow(model_check), 0)))
+  }
+}
+if (!is.null(prior) && any(totals$method == "Bayesian posterior")) {
+  fitted <- prior |> filter(status == "Fitted") |> arrange(depth_cm)
+  if (nrow(fitted)) {
+    habitat <- paste(unique(fitted$ecosystem), collapse = ", ")
+    cat(sprintf("The Bayesian model used **%s** cores for its starting estimate. Confirm the local habitat before using that estimate for the site.\n\n",
+                tolower(habitat)))
+  }
+}
+```
+
+Each total uses stock up to the listed depth or the sampled bottom at each study core. The totals overlap across depths. Estimates vary with the reference cores, the sampling coverage and the mapping method.
+
+## Reference
+
+Janousek, C. N., et al. (2025). Blue carbon stocks along the Pacific coast of North America are mainly driven by local rather than regional factors. *Global Biogeochemical Cycles, 39*, e2024GB008239. [doi:10.1029/2024GB008239](https://doi.org/10.1029/2024GB008239)

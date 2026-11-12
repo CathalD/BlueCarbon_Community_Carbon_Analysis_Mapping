@@ -1,0 +1,14 @@
+.DS_Store
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.quarto/
+/.Renviron
+/archive/
+/outputs/
+/Blue_Carbon_Report.html
+/Blue_Carbon_Report_files/
+/Blue_Carbon_Report.knit.md
+/Blue_Carbon_Report.rmarkdown
+/data/covariate_transfer/pred_points.csv
